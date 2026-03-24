@@ -1,0 +1,47 @@
+---
+title: "Linguistics EDA R Answers"
+format: pdf
+editor: visual
+execute:
+  message: false
+  echo: false
+---
+
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(vroom)
+library(spmodel)
+library(viridis)
+dat <- vroom('../Data/All_Linguistics.csv') %>%
+  filter(!is.na(y))
+```
+
+1.  Create a heat map of the linguistics data. Use ChatGPT to figure out how to add a map of the US to the background. Also, for the color scale, use one of the `viridis` color scales (which are specially tailored to people with color blindness).
+
+```{r}
+us_states <- map_data("state")
+ggplot() + 
+  geom_polygon(data = us_states, aes(x = long, y = lat, group = group), 
+               fill = NA, color = "black") +
+  geom_point(data=dat, aes(x=long, y=lat, color=y)) +
+  scale_color_viridis()
+```
+
+2.  Create and plot the auto-*covariance* function of residuals from a linear model that uses `state` to predict the Getis-ord score (`y`) with the linguistics data.
+
+```{r}
+dat %>%
+  eacf(formula=y~state, data=., xcoord=long, ycoord=lat) %>%
+  plot()
+```
+
+3.  To show what a auto-covariance function looks like for data with NO spatial correlation, shuffle the longitude and latitude coordinates of the linguistics data and recompute and plot the resulting `eacf` from #2 above.
+
+```{r}
+shuffled_dat <- dat %>%
+  mutate(lat=sample(lat),
+         long=sample(long))
+shuffled_esv <- eacf(formula=y~state, data=shuffled_dat, xcoord=long, ycoord=lat)
+plot(shuffled_esv)
+
+```

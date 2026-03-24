@@ -1,0 +1,666 @@
+---
+title: "Oh Rats"
+format:
+  pdf:
+    latex-auto-install: false
+    geometry:
+      - top=10mm
+      - bottom=20mm
+author: Jenna Worthen
+execute:
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# 2026 case study competition
+
+Jenna's first attempt at solving the rats. Help with Grok AI. While
+eavesdropping in the TA lab, I noticed TIm had a few of the same plots I
+made... **so this definitely** cannot be the final results or plots.
+
+I also want to use more Stat 469 stuff so we'll need to look there in
+our meeting.
+
+Extra data sources: [Water
+Map](https://www.nyc.gov/content/planning/pages/resources/datasets/borough-boundaries)
+\| [NYC City Council Districts
+Map](https://hub.arcgis.com/datasets/DCP::nyc-city-council-districts-1/about)
+\| [Subway
+Stations](https://catalog.data.gov/dataset/mta-subway-stations)
+
+```{r, warning=FALSE, message=FALSE, include = FALSE}
+library(readxl)
+library(spmodel)
+library(ggplot2)
+library(tidyverse)
+library(leaflet)
+library(viridis)
+rat <- read.csv("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/311_rodent_calls.csv")
+nyc <- read_excel("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/nyc_council_context.xlsx")
+```
+
+```{r, warning=FALSE, message=FALSE}
+map <- map_data("county", "new york")
+ggplot() + 
+  geom_polygon(data = map, aes(x = long, y = lat, group = group), 
+               fill = NA, color = "black") +
+  geom_point(data=rat, aes(x=Longitude, y=Latitude)) +
+  scale_color_viridis()
+```
+
+We are only focusing on NYC so we cannot use this NY state map. Below I
+download a shapefile from a arcgis website of nyc council districts.
+
+```{r, warning=FALSE, message=FALSE}
+library(sf)
+districts <- st_read("C:/Users/Jenna/OneDrive/Desktop/cc26/NYC_City_Council_Districts/NYC_City_Council_Districts.shp")
+
+ggplot(data = districts) +
+  geom_sf(aes(fill = as.factor(CounDist)), color = "white", size = 0.2) +
+  scale_fill_viridis_d(guide = "none") + # Uses a nice color scale
+  labs(title = "NYC City Council Districts",
+       caption = "Source: NYC Open Data") +
+  theme_minimal()
+
+```
+
+I plot all rat occurenses onto the shapefile colored by district.
+
+```{r}
+rats_sf <- rat %>%
+  # Remove rows where either Longitude or Latitude is NA
+  filter(!is.na(Longitude) & !is.na(Latitude)) %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Transform points to match the NYC Districts shapefile projection
+rats_sf <- st_transform(rats_sf, st_crs(districts))
+
+ggplot() +
+  # Layer 1: The NYC Districts (Polygons)
+  geom_sf(data = districts, fill = "lightgrey", color = "black") +
+  # Layer 2: Your Points
+  geom_sf(data = rats_sf, aes(color = as.factor(Council.District)), size = 3) +
+  theme_minimal()
+```
+
+Grok AI said that the best way to begin would be by looking at the
+resolution descritions and finding out how many broad categories there
+are of resolution. I chose Confirmed and Not confirmed of violations
+found/approved rodent problems.
+
+```{r}
+description <- rat %>%
+  count(`Resolution.Description`, sort = TRUE)
+print(description)
+```
+
+Here we sort all resolution descriptions into the 2 categories and get a
+simple summary.
+
+```{r}
+rodent <- rat %>%
+  mutate(
+    confirmed = case_when(
+      str_detect(`Resolution.Description`, "found violations") |
+      str_detect(`Resolution.Description`, "violations were identified") |
+      str_detect(`Resolution.Description`, "passed with minor violations") |
+      str_detect(`Resolution.Description`, "provided with information and guidance on eliminating rodents") ~ "Confirmed",
+      TRUE ~ "Not Confirmed"
+    )
+  )
+
+# Overall summary (how many are confirmed vs not)
+overall_summary <- rodent %>%
+  count(confirmed) %>%
+  mutate(percent = round(n / sum(n) * 100, 1))
+
+print("=== Overall Summary ===")
+print(overall_summary)
+
+# District-level summary (this is the important one)
+district_summary <- rodent %>%
+  count(`Council.District`, confirmed) %>%          # make sure the column name matches exactly
+  pivot_wider(names_from = confirmed, 
+              values_from = n, 
+              values_fill = 0) %>%
+  mutate(
+    total_reports = Confirmed + `Not Confirmed`,
+    confirmed_issues = Confirmed
+  ) %>%
+  select(`Council.District`, total_reports, confirmed_issues) %>%
+  arrange(desc(total_reports))
+
+print("=== District Summary (top 10 shown) ===")
+print(district_summary %>% slice_head(n = 10))
+print("Full district_summary has 51 rows")
+```
+
+Now we separate these statistics for all districts. We find the total
+rat reports and total confirmed rat reports.
+
+```{r}
+# 2. Aggregate to district level
+district_rodent <- rodent %>%
+  count(`Council.District`, confirmed) %>%
+  pivot_wider(names_from = confirmed, values_from = n, values_fill = 0) %>%
+  mutate(
+    total_reports = Confirmed + `Not Confirmed`,
+    confirmed_issues = Confirmed
+  ) %>%
+  select(district_id = `Council.District`, 
+         total_reports, 
+         confirmed_issues)
+
+# 4. Join them (make sure the ID column names match)
+#    Look at your context file: is the ID called council_district_id or council_district ?
+#    Change the join key accordingly.
+
+combined <- nyc %>%
+  left_join(district_rodent, by = c("council_district_id" = "district_id")) %>%   # <-- CHANGE THIS LINE IF THE COLUMN NAME IS DIFFERENT
+  mutate(
+    population = as.numeric(population),   # just in case
+    rate_all_reports_per1000 = (total_reports / population) * 1000,
+    rate_confirmed_per1000   = (confirmed_issues / population) * 1000
+  ) %>%
+  arrange(desc(rate_all_reports_per1000))
+
+# 5. Print key results
+print("=== Top 10 districts by reporting rate (per 1,000 people) ===")
+combined %>%
+  select(council_district_id, council_district_name, population, 
+         total_reports, rate_all_reports_per1000, 
+         confirmed_issues, rate_confirmed_per1000) %>%
+  slice_head(n = 10) %>%
+  print()
+
+print("\n=== Summary statistics of the two rates ===")
+summary(combined %>% select(rate_all_reports_per1000, rate_confirmed_per1000))
+```
+
+## GGPlot 2 Statistics
+
+Here is a patchwork plot with the 2 statistics for each district.
+
+```{r}
+library(patchwork)
+map_data <- districts %>%
+  mutate(CounDist = as.numeric(CounDist)) %>%   # ensure it's numeric
+  left_join(combined, by = c("CounDist" = "council_district_id"))
+
+# 4. Side-by-side maps
+p1 <- ggplot(map_data) +
+  geom_sf(aes(fill = rate_all_reports_per1000), color = "white", linewidth = 0.3) +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red", fontface = "bold") +
+  scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000 residents") +
+  labs(title = "All Rodent 311 Reporting Rate",
+       subtitle = "2025 • Hotter colors = more complaints per capita") +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+p2 <- ggplot(map_data) +
+  geom_sf(aes(fill = rate_confirmed_per1000), color = "white", linewidth = 0.3) +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red", fontface = "bold") +
+  scale_fill_viridis_c(option = "inferno", name = "Confirmed Issues per 1,000") +
+  labs(title = "Confirmed Rodent Issues Rate",
+       subtitle = "Violations found or owner guidance provided (30.1% of reports)") +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+combined_map <- p1 + p2 + plot_layout(ncol = 2)
+print(combined_map)
+```
+
+Same thing as above but with leaflet.
+
+```{r}
+# map_data <- districts %>%
+#   mutate(CounDist = as.numeric(CounDist)) %>%
+#   left_join(combined, by = c("CounDist" = "council_district_id")) %>%
+#   # Transform to lat/long for Leaflet
+#   st_transform(4326) %>%
+#   # Create nice popup
+#   mutate(
+#     popup_text = paste0(
+#       "<b>District ", CounDist, "</b><br>",
+#       "<i>", council_district_name, "</i><br><br>",
+#       "All Reports: <b>", total_reports, "</b> (", rate_all_reports_per1000, " per 1,000)<br>",
+#       "Confirmed Issues: <b>", confirmed_issues, "</b> (", rate_confirmed_per1000, " per 1,000)<br>",
+#       "Population: ", scales::comma(population)
+#     )
+#   )
+# 
+# pal_reports <- colorNumeric("plasma", domain = map_data$rate_all_reports_per1000, na.color = "grey")
+# pal_conf    <- colorNumeric("inferno", domain = map_data$rate_confirmed_per1000, na.color = "grey")
+# 
+# leaflet_map <- leaflet(map_data) %>%
+#   addProviderTiles(providers$CartoDB.Positron) %>%
+#   
+#   # Layer 1: All Reporting Rate
+#   addPolygons(
+#     group = "All Reporting Rate",
+#     fillColor = ~pal_reports(rate_all_reports_per1000),
+#     weight = 1.5,
+#     opacity = 1,
+#     color = "white",
+#     fillOpacity = 0.75,
+#     popup = ~popup_text,
+#     highlightOptions = highlightOptions(weight = 3, color = "black", bringToFront = TRUE)
+#   ) %>%
+#   
+#   # Layer 2: Confirmed Rate
+#   addPolygons(
+#     group = "Confirmed Issues Rate",
+#     fillColor = ~pal_conf(rate_confirmed_per1000),
+#     weight = 1.5,
+#     opacity = 1,
+#     color = "white",
+#     fillOpacity = 0.75,
+#     popup = ~popup_text,
+#     highlightOptions = highlightOptions(weight = 3, color = "black", bringToFront = TRUE)
+#   ) %>%
+#   
+#   # Layer controls
+#   addLayersControl(
+#     baseGroups = c("All Reporting Rate", "Confirmed Issues Rate"),
+#     options = layersControlOptions(collapsed = FALSE)
+#   ) %>%
+#   
+#   # Legends
+#   addLegend("bottomright",
+#             pal = pal_reports,
+#             values = ~rate_all_reports_per1000,
+#             title = "Reports per 1,000",
+#             opacity = 0.9) %>%
+#   addLegend("bottomleft",
+#             pal = pal_conf,
+#             values = ~rate_confirmed_per1000,
+#             title = "Confirmed per 1,000",
+#             opacity = 0.9)
+# 
+# leaflet_map   # ← this should now open cleanly in the Viewer
+```
+
+```{r}
+# 5. Quick correlation table (careful interpretation only!)
+cor_table <- combined %>%
+  select(rate_all_reports_per1000, rate_confirmed_per1000,
+         poverty_rate, unemployment_rate,
+         pct_renter_occupied_among_occupied_units, 
+         pct_vacant_housing_units, 
+         median_household_income,
+         pct_households_broadband,
+         pct_language_other_than_english_proxy) %>%
+  cor(use = "complete.obs") %>%
+  round(3)
+
+print("=== Pearson Correlations with Rates ===")
+print(cor_table)
+```
+
+```{r}
+library(spdep)
+
+# Use the combined object from before
+model_data <- combined %>%
+  filter(!is.na(rate_all_reports_per1000))   # drop any missing if any
+
+# Create spatial weights (queen contiguity)
+nb <- poly2nb(map_data, queen = TRUE)          # map_data from Leaflet code (has geometry)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+# ----------------- Model 1: All Reports Rate -----------------
+mod_reports <- lm(rate_all_reports_per1000 ~ 
+                    pct_renter_occupied_among_occupied_units + 
+                    poverty_rate + 
+                    unemployment_rate + 
+                    median_household_income,
+                  data = model_data)
+
+summary(mod_reports)
+
+# Moran’s I on residuals
+moran_reports <- moran.test(residuals(mod_reports), lw, zero.policy = TRUE)
+print("Moran's I for Reports model residuals:")
+print(moran_reports)
+
+# ----------------- Model 2: Confirmed Issues Rate -----------------
+mod_confirmed <- lm(rate_confirmed_per1000 ~ 
+                      pct_renter_occupied_among_occupied_units + 
+                      poverty_rate + 
+                      unemployment_rate + 
+                      median_household_income,
+                    data = model_data)
+
+summary(mod_confirmed)
+
+moran_conf <- moran.test(residuals(mod_confirmed), lw, zero.policy = TRUE)
+print("Moran's I for Confirmed model residuals:")
+print(moran_conf)
+```
+
+**Reporting Rate Model (All 311 complaints per 1,000)**
+
+\% Renter-occupied is the only statistically significant predictor (p =
+0.0035). For every 10 percentage point increase in renter-occupied
+units, the reporting rate increases by about 0.68 per 1,000 residents.
+Poverty, unemployment, and median income are not significant once renter
+% is in the model. Model explains \~40% of the variation (Adjusted R² =
+0.35). Strong spatial autocorrelation in residuals (Moran’s I = 0.275, p
+= 0.0006) → we should account for spatial dependence.
+
+**Confirmed Issues Rate Model**
+
+\% Renter-occupied is even stronger (p \< 0.0001). Every 10 pp increase
+→ +0.27 confirmed issues per 1,000. Other variables remain
+non-significant. Model explains \~47% of variation (Adjusted R² = 0.43).
+No significant spatial autocorrelation in residuals (Moran’s I p =
+0.156) — ordinary least squares is acceptable here.
+
+### Key takeaway (careful framing for DOHMH):
+
+Higher renter-occupied housing share is consistently associated with
+both more rodent complaints and more confirmed issues, even after
+controlling for poverty, unemployment, and income. This points toward
+housing stock and rental market conditions (older buildings, maintenance
+issues, tenant turnover, etc.) rather than demographics alone.
+
+## Simple spatial model
+
+```{r}
+library(spatialreg)
+
+# Spatial Lag Model (reports rate)
+sar_reports <- lagsarlm(rate_all_reports_per1000 ~ 
+                         pct_renter_occupied_among_occupied_units + 
+                         poverty_rate + 
+                         unemployment_rate + 
+                         median_household_income,
+                       data = model_data, 
+                       listw = lw, 
+                       zero.policy = TRUE)
+
+summary(sar_reports)
+
+# Spatial Error Model (reports rate)
+sem_reports <- errorsarlm(rate_all_reports_per1000 ~ 
+                            pct_renter_occupied_among_occupied_units + 
+                            poverty_rate + 
+                            unemployment_rate + 
+                            median_household_income,
+                          data = model_data, 
+                          listw = lw, 
+                          zero.policy = TRUE)
+
+summary(sem_reports)
+
+# Compare models with AIC (lower is better)
+AIC(mod_reports, sar_reports, sem_reports)
+```
+
+### Conclusions from the best model (SEM):
+
+After accounting for unobserved spatial clustering (e.g., neighboring
+districts sharing similar building ages, sanitation patterns, or
+reporting norms), % renter-occupied housing remains the strongest and
+only significant predictor. A 10 percentage-point higher renter share is
+associated with +0.75 rodent reports per 1,000 residents (and similarly
+strong for confirmed issues). Poverty, unemployment, and income drop to
+near-zero and non-significant once we control for renter % and spatial
+dependence.
+
+**Housing tenure (rental vs owner-occupied stock) appears to be the
+dominant district-level driver of both rodent reporting and confirmed
+issues in 2025.**
+
+## Predictions vs Actual
+
+```{r}
+# Add predictions and residuals from the best model (SEM)
+model_data <- model_data %>%
+  mutate(
+    pred_sem = fitted(sem_reports),
+    resid_sem = residuals(sem_reports)
+  )
+
+# Join back to map_data for plotting
+map_final <- map_data %>%
+  left_join(model_data %>% select(council_district_id, pred_sem, resid_sem),
+            by = c("CounDist" = "council_district_id"))
+
+# 1. Observed vs Predicted side-by-side
+p_obs <- ggplot(map_final) +
+  geom_sf(aes(fill = rate_all_reports_per1000), color = "white") +
+  scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000") +
+  labs(title = "Observed Reporting Rate") +
+  theme_minimal()
+
+p_pred <- ggplot(map_final) +
+  geom_sf(aes(fill = pred_sem), color = "white") +
+  scale_fill_viridis_c(option = "plasma", name = "Predicted") +
+  labs(title = "Predicted from Spatial Error Model") +
+  theme_minimal()
+
+p_obs + p_pred
+
+# 2. Residual map (red = model under-predicts, blue = over-predicts)
+ggplot(map_final) +
+  geom_sf(aes(fill = resid_sem), color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, name = "Residual") +
+  labs(title = "Residuals from Spatial Error Model",
+       subtitle = "Red = more reports than expected given renter % and spatial effects") +
+  theme_minimal()
+
+# 3. Print key coefficients for slides
+summary(sem_reports)
+```
+
+## New covariates: Adding Distance to water and Subway relevance
+
+```{r}
+# 1. Your existing objects (map_data or combined)
+# Assume you have map_data from before with geometry
+
+# 2. Load subway stations
+subway <- read_csv("C:/Users/Jenna/OneDrive/Desktop/cc26/MTA_Subway_Stations.csv") %>%
+  filter(!is.na(Latitude), !is.na(Longitude)) %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(st_crs(map_data))   # match your districts CRS
+
+# 3. Count subway stations per district (intersection)
+districts_with_subway <- map_data %>%
+  st_join(subway, join = st_intersects) %>%
+  group_by(CounDist, council_district_name) %>%
+  summarise(
+    subway_count = n(),
+    .groups = "drop"
+  ) %>%
+  st_drop_geometry()
+
+# Alternative: distance from district centroid to nearest subway
+centroids <- st_centroid(map_data)
+
+dist_to_subway <- st_distance(centroids, subway) %>%
+  apply(1, min)   # minimum distance in meters to any station
+
+map_data <- map_data %>%
+  mutate(
+    dist_to_nearest_subway_m = as.numeric(dist_to_subway),
+    subway_density = districts_with_subway$subway_count / as.numeric(st_area(geometry) / 1e6)   # per km² if you add count
+  )
+
+# Adding distance to water shorline
+# 2. Load the shoreline layer
+shoreline <- st_read("C:/Users/Jenna/OneDrive/Desktop/cc26/nybb_26a/nybb.shp") %>%   # or .geojson
+  st_transform(st_crs(districts))   # match CRS
+
+# 3. Create district centroids
+centroids <- st_centroid(districts)
+
+# 4. Calculate minimum distance to shoreline (in meters)
+dist_matrix <- st_distance(centroids, shoreline)
+min_dist_to_shore <- apply(dist_matrix, 1, min)
+
+# 5. Add to your map_data / combined
+map_data <- map_data %>%
+  mutate(dist_to_shoreline_m = as.numeric(min_dist_to_shore))
+
+# Optional: create a categorical version for easier interpretation
+map_data <- map_data %>%
+  mutate(near_water = ifelse(dist_to_shoreline_m < 500, "Within 500m of shoreline", "Farther inland"))
+
+# Quick check
+summary(map_data$dist_to_shoreline_m)
+```
+
+```{r}
+# 1. Make sure model_data has the same districts as before
+model_data <- combined %>%                     # 'combined' is your original joined dataset with rates
+  filter(!is.na(rate_all_reports_per1000))
+
+# 2. Add the new water variable from map_data
+#    (map_data has the geometry + CounDist)
+water_vars <- map_data %>%
+  st_drop_geometry() %>%
+  select(CounDist, dist_to_shoreline_m) %>%    # add any other water vars if you created them
+  rename(council_district_id = CounDist)
+
+# 3. Join into model_data
+model_data <- model_data %>%
+  left_join(water_vars, by = "council_district_id")
+
+# 4. Quick sanity check
+summary(model_data$dist_to_shoreline_m)
+head(model_data %>% select(council_district_id, rate_all_reports_per1000, 
+                           pct_renter_occupied_among_occupied_units, 
+                           dist_to_shoreline_m))
+
+# 5. Re-run the best Spatial Error Model with the new variable
+sem_water <- errorsarlm(rate_all_reports_per1000 ~ 
+                          pct_renter_occupied_among_occupied_units + 
+                          dist_to_shoreline_m +
+                          poverty_rate + 
+                          unemployment_rate + 
+                          median_household_income,
+                        data = model_data, 
+                        listw = lw, 
+                        zero.policy = TRUE)
+
+summary(sem_water)
+
+# Optional: also try a version with confirmed rate
+sem_conf_water <- errorsarlm(rate_confirmed_per1000 ~ 
+                               pct_renter_occupied_among_occupied_units + 
+                               dist_to_shoreline_m +
+                               poverty_rate,
+                             data = model_data, 
+                             listw = lw, 
+                             zero.policy = TRUE)
+
+summary(sem_conf_water)
+```
+
+```{r}
+# ====================== 1. Subway stations ======================
+subway <- read_csv("C:/Users/Jenna/OneDrive/Desktop/cc26/MTA_Subway_Stations.csv") %>%
+  filter(!is.na(Latitude), !is.na(Longitude)) %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(st_crs(map_data))
+
+# Count stations per district (intersection)
+districts_with_subway <- map_data %>%
+  st_join(subway, join = st_intersects) %>%
+  group_by(CounDist, council_district_name) %>%
+  summarise(subway_count = n(), .groups = "drop") %>%
+  st_drop_geometry()
+
+# Distance to nearest subway from district centroid
+centroids <- st_centroid(map_data)
+dist_to_subway <- st_distance(centroids, subway) %>%
+  apply(1, min)
+
+# ====================== 2. Shoreline (your file) ======================
+shoreline <- st_read("C:/Users/Jenna/OneDrive/Desktop/cc26/nybb_26a/nybb.shp") %>%
+  st_transform(st_crs(map_data))
+
+dist_matrix <- st_distance(centroids, shoreline)
+min_dist_to_shore <- apply(dist_matrix, 1, min)
+
+# ====================== 3. Add all new variables to map_data ======================
+map_data <- map_data %>%
+  mutate(
+    subway_count = districts_with_subway$subway_count,
+    dist_to_nearest_subway_m = as.numeric(dist_to_subway),
+    dist_to_shoreline_m = as.numeric(min_dist_to_shore),
+    near_water = ifelse(dist_to_shoreline_m < 500, "Within 500m", "Farther inland")
+  )
+
+# Quick summary of new variables
+summary(map_data %>% select(subway_count, dist_to_nearest_subway_m, dist_to_shoreline_m))
+
+# ====================== 4. Update model_data ======================
+model_data <- combined %>%
+  filter(!is.na(rate_all_reports_per1000)) %>%
+  left_join(
+    map_data %>% 
+      st_drop_geometry() %>%
+      select(CounDist, subway_count, dist_to_nearest_subway_m, 
+             dist_to_shoreline_m, near_water),
+    by = c("council_district_id" = "CounDist")
+  )
+
+# ====================== 5. Re-run Spatial Error Model with new variables ======================
+sem_full <- errorsarlm(rate_all_reports_per1000 ~ 
+                         pct_renter_occupied_among_occupied_units +
+                         subway_count +
+                         dist_to_shoreline_m +
+                         poverty_rate +
+                         unemployment_rate +
+                         median_household_income,
+                       data = model_data, 
+                       listw = lw, 
+                       zero.policy = TRUE)
+
+summary(sem_full)
+
+# Also for confirmed rate (optional but useful)
+sem_conf_full <- errorsarlm(rate_confirmed_per1000 ~ 
+                              pct_renter_occupied_among_occupied_units +
+                              subway_count +
+                              dist_to_shoreline_m +
+                              poverty_rate,
+                            data = model_data, 
+                            listw = lw, 
+                            zero.policy = TRUE)
+
+summary(sem_conf_full)
+```
+
+### Key Takeaways from the Full Model
+
+**For All Reports Rate (best Spatial Error Model)":**
+
+\% Renter-occupied remains very strong and highly significant (coeff ≈
+7.28, p \< 0.00001). → Every 10 percentage point increase in renter
+share → roughly +0.73 reports per 1,000 residents. Subway count and
+distance to shoreline are not statistically significant (p = 0.139 and p
+= 0.451). Lambda is still strong and significant → spatial clustering
+matters. AIC is similar to the previous model without subway/water
+(200.21 vs 199.00), so the new variables don’t improve the model much.
+
+**For Confirmed Issues Rate:**
+
+Again, only % renter-occupied is strongly significant. Subway count and
+distance to shoreline are clearly not significant. Poverty is borderline
+(p ≈ 0.053), but weak.
+
+**Bottom line:** The extra features (subway stations and proximity to
+water) do not add meaningful explanatory power once we account for
+renter housing share and spatial dependence. This is actually useful
+information — it suggests that in 2025 NYC rodent
+complaints/confirmations are more strongly tied to housing tenure and
+rental stock characteristics than to subway density or shoreline
+proximity at the council-district level.
