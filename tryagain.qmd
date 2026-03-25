@@ -1,0 +1,181 @@
+---
+title: "tryagain"
+format: html
+---
+
+```{r, warning=FALSE, message=FALSE, include = FALSE}
+library(readxl)
+library(spmodel)
+library(spatialreg)
+library(ggplot2)
+library(tidyverse)
+library(leaflet)
+library(viridis)
+rat <- read.csv("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/311_rodent_calls.csv")
+nyc <- read_excel("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/nyc_council_context.xlsx")
+```
+
+```{r}
+library(sf)
+districts <- st_read("C:/Users/Jenna/OneDrive/Desktop/cc26/NYC_City_Council_Districts/NYC_City_Council_Districts.shp")
+
+ggplot(data = districts) +
+  geom_sf(aes(fill = as.factor(CounDist)), color = "white", size = 0.2) +
+  scale_fill_viridis_d(guide = "none") + # Uses a nice color scale
+  labs(title = "NYC City Council Districts",
+       caption = "Source: NYC Open Data") +
+  theme_minimal()
+```
+
+```{r}
+rodent <- rat %>%
+  mutate(
+    confirmed = case_when(
+      str_detect(`Resolution.Description`, "found violations") |
+      str_detect(`Resolution.Description`, "violations were identified") |
+      str_detect(`Resolution.Description`, "passed with minor violations") |
+      str_detect(`Resolution.Description`, "provided with information and guidance on eliminating rodents") ~ "Confirmed",
+      TRUE ~ "Not Confirmed"
+    )
+  )
+
+# Overall summary (how many are confirmed vs not)
+overall_summary <- rodent %>%
+  count(confirmed) %>%
+  mutate(percent = round(n / sum(n) * 100, 1))
+
+print("=== Overall Summary ===")
+print(overall_summary)
+
+# District-level summary (this is the important one)
+district_summary <- rodent %>%
+  count(`Council.District`, confirmed) %>%          # make sure the column name matches exactly
+  pivot_wider(names_from = confirmed, 
+              values_from = n, 
+              values_fill = 0) %>%
+  mutate(
+    total_reports = Confirmed + `Not Confirmed`,
+    confirmed_issues = Confirmed
+  ) %>%
+  select(`Council.District`, total_reports, confirmed_issues) %>%
+  arrange(desc(total_reports))
+
+print("=== District Summary (top 10 shown) ===")
+print(district_summary %>% slice_head(n = 10))
+print("Full district_summary has 51 rows")
+```
+
+
+```{r}
+# 2. Aggregate to district level
+district_rodent <- rodent %>%
+  count(`Council.District`, confirmed) %>%
+  pivot_wider(names_from = confirmed, values_from = n, values_fill = 0) %>%
+  mutate(
+    total_reports = Confirmed + `Not Confirmed`,
+    confirmed_issues = Confirmed
+  ) %>%
+  select(district_id = `Council.District`, 
+         total_reports, 
+         confirmed_issues)
+
+# 4. Join them (make sure the ID column names match)
+#    Look at your context file: is the ID called council_district_id or council_district ?
+#    Change the join key accordingly.
+
+combined <- nyc %>%
+  left_join(district_rodent, by = c("council_district_id" = "district_id")) %>%   # <-- CHANGE THIS LINE IF THE COLUMN NAME IS DIFFERENT
+  mutate(
+    population = as.numeric(population),   # just in case
+    rate_all_reports_per1000 = (total_reports / population) * 1000,
+    rate_confirmed_per1000   = (confirmed_issues / population) * 1000
+  ) %>%
+  arrange(desc(rate_all_reports_per1000))
+```
+
+```{r}
+library(spdep)
+
+# Use the combined object from before
+model_data <- combined %>%
+  filter(!is.na(rate_all_reports_per1000))   # drop any missing if any
+
+# Create spatial weights (queen contiguity)
+nb <- poly2nb(map_data, queen = TRUE)          # map_data from Leaflet code (has geometry)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+```
+
+```{r}
+# Spatial Error Model (reports rate)
+sem_final <- errorsarlm(rate_all_reports_per1000 ~ 
+                            pct_renter_occupied_among_occupied_units + 
+                            poverty_rate + 
+                            unemployment_rate + 
+                            median_household_income,
+                          data = model_data, 
+                          listw = lw, 
+                          zero.policy = TRUE)
+
+summary(sem_final)
+```
+
+
+```{r}
+# ====================== 2. Basic model summary ======================
+summary(sem_final)
+
+# ====================== 3. Diagnostic plots ======================
+par(mfrow = c(2, 2))
+
+# 1. Residuals vs Fitted
+plot(fitted(sem_final), residuals(sem_final), 
+     main = "Residuals vs Fitted", xlab = "Fitted", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+# 2. Normal Q-Q plot
+qqnorm(residuals(sem_final), main = "Normal Q-Q Plot")
+qqline(residuals(sem_final), col = "red")
+
+# 3. Scale-Location (for heteroskedasticity)
+plot(fitted(sem_final), sqrt(abs(residuals(sem_final))), 
+     main = "Scale-Location", xlab = "Fitted", ylab = "√|Residuals|")
+abline(h = 0, col = "red")
+
+# 4. Residuals vs Leverage (influential points)
+plot(hatvalues(sem_final), residuals(sem_final), 
+     main = "Residuals vs Leverage")
+abline(h = 0, col = "red")
+
+# Reset plotting
+par(mfrow = c(1, 1))
+
+# ====================== 4. Spatial diagnostics ======================
+# Moran’s I on residuals (should be non-significant if model is good)
+moran_resid <- moran.test(residuals(sem_final), lw, zero.policy = TRUE)
+print("Moran's I on model residuals:")
+print(moran_resid)
+
+# ====================== 5. Observed vs Predicted plot ======================
+model_data <- model_data %>%
+  mutate(
+    predicted = fitted(sem_final),
+    residual  = residuals(sem_final)
+  )
+
+p1 <- ggplot(model_data, aes(x = rate_all_reports_per1000, y = predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Observed vs Predicted Reporting Rate",
+       x = "Observed Rate (per 1,000)", y = "Predicted Rate") +
+  theme_minimal()
+
+p2 <- ggplot(model_data, aes(x = predicted, y = residual)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Predicted",
+       x = "Predicted", y = "Residual") +
+  theme_minimal()
+
+p1 + p2
+```
+

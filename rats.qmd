@@ -31,40 +31,33 @@ Map](https://hub.arcgis.com/datasets/DCP::nyc-city-council-districts-1/about)
 \| [Subway
 Stations](https://catalog.data.gov/dataset/mta-subway-stations)
 
-```{r, warning=FALSE, message=FALSE, include = FALSE}
+```{r, warning=FALSE, message=FALSE}
 library(readxl)
 library(spmodel)
 library(ggplot2)
 library(tidyverse)
 library(leaflet)
 library(viridis)
+library(sf)
+library(spdep)
+library(patchwork)
+library(spatialreg)
+library(gstat)
 rat <- read.csv("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/311_rodent_calls.csv")
 nyc <- read_excel("C:/Users/Jenna/OneDrive/Desktop/cc26/2026/nyc_council_context.xlsx")
-```
-
-```{r, warning=FALSE, message=FALSE}
-map <- map_data("county", "new york")
-ggplot() + 
-  geom_polygon(data = map, aes(x = long, y = lat, group = group), 
-               fill = NA, color = "black") +
-  geom_point(data=rat, aes(x=Longitude, y=Latitude)) +
-  scale_color_viridis()
 ```
 
 We are only focusing on NYC so we cannot use this NY state map. Below I
 download a shapefile from a arcgis website of nyc council districts.
 
 ```{r, warning=FALSE, message=FALSE}
-library(sf)
 districts <- st_read("C:/Users/Jenna/OneDrive/Desktop/cc26/NYC_City_Council_Districts/NYC_City_Council_Districts.shp")
-
-ggplot(data = districts) +
-  geom_sf(aes(fill = as.factor(CounDist)), color = "white", size = 0.2) +
-  scale_fill_viridis_d(guide = "none") + # Uses a nice color scale
-  labs(title = "NYC City Council Districts",
-       caption = "Source: NYC Open Data") +
-  theme_minimal()
-
+# ggplot(data = districts) +
+#   geom_sf(aes(fill = as.factor(CounDist)), color = "white", size = 0.2) +
+#   scale_fill_viridis_d(guide = "none") + # Uses a nice color scale
+#   labs(title = "NYC City Council Districts",
+#        caption = "Source: NYC Open Data") +
+#   theme_minimal()
 ```
 
 I plot all rat occurenses onto the shapefile colored by district.
@@ -104,10 +97,13 @@ simple summary.
 rodent <- rat %>%
   mutate(
     confirmed = case_when(
-      str_detect(`Resolution.Description`, "found violations") |
-      str_detect(`Resolution.Description`, "violations were identified") |
-      str_detect(`Resolution.Description`, "passed with minor violations") |
-      str_detect(`Resolution.Description`, "provided with information and guidance on eliminating rodents") ~ "Confirmed",
+      str_detect(Resolution.Description, "The Department of Health and Mental Hygiene found violations on the property you reported. Follow-up inspections will be scheduled.") | 
+        str_detect(Resolution.Description, "An inspection of this property was conducted and violations were identified. The owner is correcting the condition. If the condition persists, please submit another complaint to 311.")
+      # str_detect(`Resolution.Description`, "found violations") |
+      # str_detect(`Resolution.Description`, "violations were identified") |
+      # str_detect(`Resolution.Description`, "passed with minor violations") |
+      # str_detect(`Resolution.Description`, "provided with information and guidance on eliminating rodents) 
+      ~ "Confirmed",
       TRUE ~ "Not Confirmed"
     )
   )
@@ -155,15 +151,15 @@ district_rodent <- rodent %>%
          confirmed_issues)
 
 # 4. Join them (make sure the ID column names match)
-#    Look at your context file: is the ID called council_district_id or council_district ?
-#    Change the join key accordingly.
-
 combined <- nyc %>%
   left_join(district_rodent, by = c("council_district_id" = "district_id")) %>%   # <-- CHANGE THIS LINE IF THE COLUMN NAME IS DIFFERENT
   mutate(
     population = as.numeric(population),   # just in case
     rate_all_reports_per1000 = (total_reports / population) * 1000,
-    rate_confirmed_per1000   = (confirmed_issues / population) * 1000
+    rate_confirmed_per1000   = (confirmed_issues / population) * 1000,
+    rate_all_reports = (total_reports / population),
+    rate_confirmed   = (confirmed_issues / total_reports),
+    density = (housing_units / population)
   ) %>%
   arrange(desc(rate_all_reports_per1000))
 
@@ -180,12 +176,7 @@ print("\n=== Summary statistics of the two rates ===")
 summary(combined %>% select(rate_all_reports_per1000, rate_confirmed_per1000))
 ```
 
-## GGPlot 2 Statistics
-
-Here is a patchwork plot with the 2 statistics for each district.
-
 ```{r}
-library(patchwork)
 map_data <- districts %>%
   mutate(CounDist = as.numeric(CounDist)) %>%   # ensure it's numeric
   left_join(combined, by = c("CounDist" = "council_district_id"))
@@ -193,7 +184,39 @@ map_data <- districts %>%
 # 4. Side-by-side maps
 p1 <- ggplot(map_data) +
   geom_sf(aes(fill = rate_all_reports_per1000), color = "white", linewidth = 0.3) +
-    geom_sf_text(aes(label = CounDist), size = 3, color = "red", fontface = "bold") +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red3", fontface = "bold") +
+  scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000 residents") +
+  labs(title = "All Rodent 311 Reporting Rate",
+       subtitle = "2025 • Hotter colors = more complaints per capita") +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+p2 <- ggplot(map_data) +
+  geom_sf(aes(fill = rate_confirmed), color = "white", linewidth = 0.3) +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red3", fontface = "bold") +
+  scale_fill_viridis_c(option = "turbo", name = "Confirmed Issues / Total") +
+  labs(title = "Confirmed Rodent Issues",
+       subtitle = "Violations found or owner guidance provided (27% of reports)") +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+combined_map <- p1 + p2 + plot_layout(ncol = 2)
+print(combined_map)
+```
+
+## GGPlot 2 Statistics
+
+Here is a patchwork plot with the 2 statistics for each district.
+
+```{r}
+map_data <- districts %>%
+  mutate(CounDist = as.numeric(CounDist)) %>%   # ensure it's numeric
+  left_join(combined, by = c("CounDist" = "council_district_id"))
+
+# 4. Side-by-side maps
+p1 <- ggplot(map_data) +
+  geom_sf(aes(fill = rate_all_reports_per1000), color = "white", linewidth = 0.3) +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red3", fontface = "bold") +
   scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000 residents") +
   labs(title = "All Rodent 311 Reporting Rate",
        subtitle = "2025 • Hotter colors = more complaints per capita") +
@@ -202,10 +225,10 @@ p1 <- ggplot(map_data) +
 
 p2 <- ggplot(map_data) +
   geom_sf(aes(fill = rate_confirmed_per1000), color = "white", linewidth = 0.3) +
-    geom_sf_text(aes(label = CounDist), size = 3, color = "red", fontface = "bold") +
-  scale_fill_viridis_c(option = "inferno", name = "Confirmed Issues per 1,000") +
+    geom_sf_text(aes(label = CounDist), size = 3, color = "red3", fontface = "bold") +
+  scale_fill_viridis_c(option = "inferno", name = "Confirmed Issues per 1,000 residents") +
   labs(title = "Confirmed Rodent Issues Rate",
-       subtitle = "Violations found or owner guidance provided (30.1% of reports)") +
+       subtitle = "Violations found or owner guidance provided (27% of reports)") +
   theme_minimal() +
   theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
 
@@ -215,7 +238,7 @@ print(combined_map)
 
 Same thing as above but with leaflet.
 
-```{r}
+```{r, include = FALSE}
 # map_data <- districts %>%
 #   mutate(CounDist = as.numeric(CounDist)) %>%
 #   left_join(combined, by = c("CounDist" = "council_district_id")) %>%
@@ -312,33 +335,35 @@ nb <- poly2nb(map_data, queen = TRUE)          # map_data from Leaflet code (has
 lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 
 # ----------------- Model 1: All Reports Rate -----------------
-mod_reports <- lm(rate_all_reports_per1000 ~ 
-                    pct_renter_occupied_among_occupied_units + 
-                    poverty_rate + 
-                    unemployment_rate + 
-                    median_household_income,
+mod_reports <- lm(rate_all_reports_per1000 ~
+                    density + 
+                    pct_renter_occupied_among_occupied_units +
+                    poverty_rate +
+                    unemployment_rate +
+                    median_household_income+ pct_language_other_than_english_proxy,
                   data = model_data)
 
 summary(mod_reports)
 
-# Moran’s I on residuals
-moran_reports <- moran.test(residuals(mod_reports), lw, zero.policy = TRUE)
-print("Moran's I for Reports model residuals:")
-print(moran_reports)
+# # Moran’s I on residuals
+# moran_reports <- moran.test(residuals(mod_reports), lw, zero.policy = TRUE)
+# print("Moran's I for Reports model residuals:")
+# print(moran_reports)
 
 # ----------------- Model 2: Confirmed Issues Rate -----------------
 mod_confirmed <- lm(rate_confirmed_per1000 ~ 
-                      pct_renter_occupied_among_occupied_units + 
-                      poverty_rate + 
-                      unemployment_rate + 
-                      median_household_income,
+                      density + 
+                      pct_renter_occupied_among_occupied_units +
+                      poverty_rate +
+                      unemployment_rate +
+                      median_household_income + pct_language_other_than_english_proxy,
                     data = model_data)
 
 summary(mod_confirmed)
 
-moran_conf <- moran.test(residuals(mod_confirmed), lw, zero.policy = TRUE)
-print("Moran's I for Confirmed model residuals:")
-print(moran_conf)
+# moran_conf <- moran.test(residuals(mod_confirmed), lw, zero.policy = TRUE)
+# print("Moran's I for Confirmed model residuals:")
+# print(moran_conf)
 ```
 
 **Reporting Rate Model (All 311 complaints per 1,000)**
@@ -370,34 +395,31 @@ issues, tenant turnover, etc.) rather than demographics alone.
 ## Simple spatial model
 
 ```{r}
-library(spatialreg)
-
 # Spatial Lag Model (reports rate)
-sar_reports <- lagsarlm(rate_all_reports_per1000 ~ 
-                         pct_renter_occupied_among_occupied_units + 
-                         poverty_rate + 
-                         unemployment_rate + 
-                         median_household_income,
+sem_confirmed_reports <- errorsarlm(rate_confirmed_per1000 ~ 
+                      density + 
+                      pct_renter_occupied_among_occupied_units +
+                      poverty_rate +
+                      unemployment_rate +
+                      median_household_income + pct_language_other_than_english_proxy,
                        data = model_data, 
                        listw = lw, 
                        zero.policy = TRUE)
 
-summary(sar_reports)
+summary(sem_confirmed_reports)
 
 # Spatial Error Model (reports rate)
 sem_reports <- errorsarlm(rate_all_reports_per1000 ~ 
-                            pct_renter_occupied_among_occupied_units + 
-                            poverty_rate + 
-                            unemployment_rate + 
-                            median_household_income,
+                      density + 
+                      pct_renter_occupied_among_occupied_units +
+                      poverty_rate +
+                      unemployment_rate +
+                      median_household_income + pct_language_other_than_english_proxy,
                           data = model_data, 
                           listw = lw, 
                           zero.policy = TRUE)
 
 summary(sem_reports)
-
-# Compare models with AIC (lower is better)
-AIC(mod_reports, sar_reports, sem_reports)
 ```
 
 ### Conclusions from the best model (SEM):
@@ -415,47 +437,66 @@ dependence.
 dominant district-level driver of both rodent reporting and confirmed
 issues in 2025.**
 
+## Validations
+
+```{r}
+# Confirmed
+map_data$model_resids <- residuals(sem_confirmed_reports)
+vgm_resids_c <- variogram(model_resids ~ 1, data = map_data)
+plot(vgm_resids_c, main = "Confirmed Rep Variogram")
+
+# Total reports
+map_data$model_resids <- residuals(sem_reports)
+vgm_resids <- variogram(model_resids ~ 1, data = map_data)
+plot(vgm_resids, main = "Total Rep Variogram")
+```
+
+```{r}
+hist(residuals(sem_confirmed_reports))
+hist(residuals(sem_reports))
+```
+
 ## Predictions vs Actual
 
 ```{r}
-# Add predictions and residuals from the best model (SEM)
-model_data <- model_data %>%
-  mutate(
-    pred_sem = fitted(sem_reports),
-    resid_sem = residuals(sem_reports)
-  )
-
-# Join back to map_data for plotting
-map_final <- map_data %>%
-  left_join(model_data %>% select(council_district_id, pred_sem, resid_sem),
-            by = c("CounDist" = "council_district_id"))
-
-# 1. Observed vs Predicted side-by-side
-p_obs <- ggplot(map_final) +
-  geom_sf(aes(fill = rate_all_reports_per1000), color = "white") +
-  scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000") +
-  labs(title = "Observed Reporting Rate") +
-  theme_minimal()
-
-p_pred <- ggplot(map_final) +
-  geom_sf(aes(fill = pred_sem), color = "white") +
-  scale_fill_viridis_c(option = "plasma", name = "Predicted") +
-  labs(title = "Predicted from Spatial Error Model") +
-  theme_minimal()
-
-p_obs + p_pred
-
-# 2. Residual map (red = model under-predicts, blue = over-predicts)
-ggplot(map_final) +
-  geom_sf(aes(fill = resid_sem), color = "white") +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                       midpoint = 0, name = "Residual") +
-  labs(title = "Residuals from Spatial Error Model",
-       subtitle = "Red = more reports than expected given renter % and spatial effects") +
-  theme_minimal()
-
-# 3. Print key coefficients for slides
-summary(sem_reports)
+# # Add predictions and residuals from the best model (SEM)
+# model_data <- model_data %>%
+#   mutate(
+#     pred_sem = fitted(sem_reports),
+#     resid_sem = residuals(sem_reports)
+#   )
+# 
+# # Join back to map_data for plotting
+# map_final <- map_data %>%
+#   left_join(model_data %>% select(council_district_id, pred_sem, resid_sem),
+#             by = c("CounDist" = "council_district_id"))
+# 
+# # 1. Observed vs Predicted side-by-side
+# p_obs <- ggplot(map_final) +
+#   geom_sf(aes(fill = rate_all_reports_per1000), color = "white") +
+#   scale_fill_viridis_c(option = "plasma", name = "Reports per 1,000") +
+#   labs(title = "Observed Reporting Rate") +
+#   theme_minimal()
+# 
+# p_pred <- ggplot(map_final) +
+#   geom_sf(aes(fill = pred_sem), color = "white") +
+#   scale_fill_viridis_c(option = "plasma", name = "Predicted") +
+#   labs(title = "Predicted from Spatial Error Model") +
+#   theme_minimal()
+# 
+# p_obs + p_pred
+# 
+# # 2. Residual map (red = model under-predicts, blue = over-predicts)
+# ggplot(map_final) +
+#   geom_sf(aes(fill = resid_sem), color = "white") +
+#   scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+#                        midpoint = 0, name = "Residual") +
+#   labs(title = "Residuals from Spatial Error Model",
+#        subtitle = "Red = more reports than expected given renter % and spatial effects") +
+#   theme_minimal()
+# 
+# # 3. Print key coefficients for slides
+# summary(sem_reports)
 ```
 
 ## New covariates: Adding Distance to water and Subway relevance
@@ -563,7 +604,7 @@ sem_conf_water <- errorsarlm(rate_confirmed_per1000 ~
 summary(sem_conf_water)
 ```
 
-```{r}
+```{r, warning = FALSE, message = FALSE}
 # ====================== 1. Subway stations ======================
 subway <- read_csv("C:/Users/Jenna/OneDrive/Desktop/cc26/MTA_Subway_Stations.csv") %>%
   filter(!is.na(Latitude), !is.na(Longitude)) %>%
