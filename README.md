@@ -29,4 +29,7 @@ A collection of Case Study documents
 
 * TIME OF YEAR! (holiday, wheather influence for reports)
 
-
+[Rats nyc website](https://www.nyc.gov/site/doh/health/health-topics/rat-maps-and-data-rat-indexing.page)
+[Rat mitigation report](https://a816-dohbesp.nyc.gov/IndicatorPublic/data-features/rat-report/)
+[Rat map](https://a816-dohbesp.nyc.gov/IndicatorPublic/Rats/)
+[data source?](https://a816-dohbesp.nyc.gov/IndicatorPublic/data-explorer/mice-and-rats/?id=2434#display=summary)

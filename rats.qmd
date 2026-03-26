@@ -79,6 +79,12 @@ ggplot() +
   theme_minimal()
 ```
 
+```{r}
+location <- rat %>%
+     count(Location, sort = TRUE)
+print(location, n=10)
+```
+
 Grok AI said that the best way to begin would be by looking at the
 resolution descritions and finding out how many broad categories there
 are of resolution. I chose Confirmed and Not confirmed of violations
@@ -96,6 +102,8 @@ simple summary.
 ```{r}
 rodent <- rat %>%
   mutate(
+    created_date = mdy_hms(`Created.Date`),     # handles "12/31/2025 09:50:33 PM"
+    month = month(created_date, label = TRUE, abbr = TRUE),   # Jan, Feb, Mar...
     confirmed = case_when(
       str_detect(Resolution.Description, "The Department of Health and Mental Hygiene found violations on the property you reported. Follow-up inspections will be scheduled.") | 
         str_detect(Resolution.Description, "An inspection of this property was conducted and violations were identified. The owner is correcting the condition. If the condition persists, please submit another complaint to 311.")
@@ -132,6 +140,43 @@ district_summary <- rodent %>%
 print("=== District Summary (top 10 shown) ===")
 print(district_summary %>% slice_head(n = 10))
 print("Full district_summary has 51 rows")
+```
+
+```{r}
+rodent_monthly <- rodent %>%
+  count(month, confirmed) %>%
+  group_by(confirmed) %>%
+  mutate(
+    total_for_year = sum(n),
+    monthly_average = mean(n)          # average complaints per month
+  ) %>%
+  ungroup()
+
+# plots of rat sitings by time of year
+# Simple plot - All Reports vs Confirmed by month
+ggplot(rodent_monthly, aes(x = month, y = n, fill = confirmed)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "NYC Rodent 311 Complaints by Month (2025)",
+    subtitle = "All reports vs Confirmed issues",
+    x = "Month",
+    y = "Number of Complaints",
+    fill = "Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Optional: Just the line plot version (often cleaner)
+ggplot(rodent_monthly, aes(x = month, y = n, color = confirmed, group = confirmed)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(
+    title = "Seasonal Pattern of Rodent Complaints in NYC (2025)",
+    x = "Month",
+    y = "Number of 311 Complaints",
+    color = "Type"
+  ) +
+  theme_minimal()
 ```
 
 Now we separate these statistics for all districts. We find the total
